@@ -1,0 +1,177 @@
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("xgboost")) install.packages("xgboost")
+if (!require("randomForest")) install.packages("randomForest")
+if (!require("caTools")) install.packages("caTools")
+if (!require("caret")) install.packages("caret")
+if (!require("pROC")) install.packages("pROC")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("dplyr")) install.packages("dplyr")
+
+library(tidyverse)
+library(xgboost)
+library(randomForest)
+library(caTools)
+library(caret)
+library(pROC)
+library(ggplot2)
+library(dplyr)
+
+set.seed(123) 
+
+n <- 10000
+edad <- sample(18:70, n, replace = TRUE)
+ingreso <- round(rnorm(n, mean = 50000, sd = 15000), 0)
+genero <- sample(c("Hombre", "Mujer"), n, replace = TRUE)
+visitas_web <- sample(0:20, n, replace = TRUE)
+
+
+compra <- ifelse(runif(n) < plogis(0.02 * (ingreso / 1000) + 0.3 * visitas_web - 5), 1, 0)
+
+datos <- data.frame(edad, ingreso, genero, visitas_web, compra)
+
+datos$genero <- as.factor(datos$genero)
+
+datos$compra <- as.factor(datos$compra)
+
+head(datos)
+
+set.seed(123)
+split <- sample.split(datos$compra, SplitRatio = 0.8)
+datos_entrenamiento <- subset(datos, split == TRUE)
+datos_prueba <- subset(datos, split == FALSE)
+
+entrenamiento_matrix <- model.matrix(compra ~ ., data = datos_entrenamiento)[, -1]
+prueba_matrix <- model.matrix(compra ~ ., data = datos_prueba)[, -1]
+etiqueta_entrenamiento <- as.numeric(datos_entrenamiento$compra) - 1 
+etiqueta_prueba <- as.numeric(datos_prueba$compra) - 1
+
+modelo_xgb <- xgboost(
+  data = entrenamiento_matrix,
+  label = etiqueta_entrenamiento,
+  nrounds = 100,
+  objective = "binary:logistic",
+  verbose = 0
+)
+
+prediccion_xgb <- predict(modelo_xgb, prueba_matrix)
+clase_pred_xgb <- ifelse(prediccion_xgb > 0.5, 1, 0)
+
+modelo_glm <- glm(compra ~ ., data = datos_entrenamiento, family = binomial)
+prediccion_glm <- predict(modelo_glm, datos_prueba, type = "response")
+clase_pred_glm <- ifelse(prediccion_glm > 0.5, 1, 0)
+
+datos_entrenamiento$compra <- as.factor(datos_entrenamiento$compra)
+datos_prueba$compra <- as.factor(datos_prueba$compra)
+
+modelo_rf <- randomForest(compra ~ ., data = datos_entrenamiento, ntree = 100)
+
+prediccion_rf <- predict(modelo_rf, datos_prueba)
+probabilidad_rf <- predict(modelo_rf, datos_prueba, type = "prob")[, 2]
+
+calcular_metricas_porcentaje <- function(real, pred_prob, pred_class) {
+  cm <- confusionMatrix(as.factor(pred_class), as.factor(real), positive = "1")
+  
+  precision <- cm$byClass['Precision'] * 100
+  sensibilidad <- cm$byClass['Recall'] * 100
+  especificidad <- cm$byClass['Specificity'] * 100
+  f1 <- cm$byClass['F1'] * 100
+  auc <- roc(as.numeric(real), pred_prob)$auc * 100  
+  
+  list(
+    Precision = precision,
+    Sensibilidad = sensibilidad,
+    Especificidad = especificidad,
+    F1 = f1,
+    AUC = auc
+  )
+}
+
+metricas_xgb <- calcular_metricas_porcentaje(etiqueta_prueba, prediccion_xgb, clase_pred_xgb)
+metricas_xgb
+
+metricas_glm <- calcular_metricas_porcentaje(datos_prueba$compra, prediccion_glm, clase_pred_glm)
+metricas_glm
+
+metricas_rf <- calcular_metricas_porcentaje(datos_prueba$compra, probabilidad_rf, prediccion_rf)
+metricas_rf
+
+tabla_metricas <- rbind(
+  XGBoost = unlist(metricas_xgb),
+  Regresion_Logistica = unlist(metricas_glm),
+  Random_Forest = unlist(metricas_rf)
+)
+
+print(tabla_metricas)
+
+matriz_confusion_xgb <- confusionMatrix(as.factor(clase_pred_xgb), as.factor(etiqueta_prueba))
+matriz_df_xgb <- as.data.frame(matriz_confusion_xgb$table)
+colnames(matriz_df_xgb) <- c("Predicho", "Real", "Frecuencia")
+ggplot(matriz_df_xgb, aes(x = Real, y = Predicho, fill = Frecuencia)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Frecuencia / sum(matriz_df_xgb$Frecuencia) * 100, 1), "%")), color = "white") +
+  scale_fill_gradient(low = "lightblue", high = "green") +
+  labs(
+    title = "Matriz de Confusión XGBoost en Porcentaje",
+    x = "Clase Real",
+    y = "Clase Predicha"
+  ) +
+  theme_minimal()
+
+matriz_confusion_glm <- confusionMatrix(as.factor(clase_pred_glm), as.factor(datos_prueba$compra))
+matriz_df_glm <- as.data.frame(matriz_confusion_glm$table)
+colnames(matriz_df_glm) <- c("Predicho", "Real", "Frecuencia")
+ggplot(matriz_df_glm, aes(x = Real, y = Predicho, fill = Frecuencia)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Frecuencia / sum(matriz_df_glm$Frecuencia) * 100, 1), "%")), color = "white") +
+  scale_fill_gradient(low = "lightblue", high = "green") +
+  labs(
+    title = "Matriz de Confusión Regresión Logística en Porcentaje",
+    x = "Clase Real",
+    y = "Clase Predicha"
+  ) +
+  theme_minimal()
+
+matriz_confusion_rf <- confusionMatrix(prediccion_rf, datos_prueba$compra)
+matriz_df_rf <- as.data.frame(matriz_confusion_rf$table)
+colnames(matriz_df_rf) <- c("Predicho", "Real", "Frecuencia")
+ggplot(matriz_df_rf, aes(x = Real, y = Predicho, fill = Frecuencia)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Frecuencia / sum(matriz_df_rf$Frecuencia) * 100, 1), "%")), color = "white") +
+  scale_fill_gradient(low = "lightblue", high = "blue") +
+  labs(
+    title = "Matriz de Confusión Random Forest en Porcentaje",
+    x = "Clase Real",
+    y = "Clase Predicha"
+  ) +
+  theme_minimal()
+
+
+
+
+
+
+
+
+
+
+
+if (!require("ggplot2")) install.packages("ggplot2")
+library(ggplot2)
+
+conteo_genero_compra <- datos %>%
+  group_by(genero, compra) %>%
+  summarise(Cantidad = n()) %>%
+  ungroup()
+
+print(conteo_genero_compra)
+
+ggplot(conteo_genero_compra, aes(x = genero, y = Cantidad, fill = factor(compra))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Cantidad de Compras por Género",
+    x = "Género",
+    y = "Cantidad de Personas",
+    fill = "Compra (1 = Sí, 0 = No)"
+  ) +
+  theme_minimal()
+
